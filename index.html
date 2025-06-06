@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>나스닥 1위 대비 테슬라 시총 비율 알리미 (실시간 연동)</title>
+    <title>나스닥 1위 대비 테슬라 시총 비율 알리미 (색상 추가)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap" rel="stylesheet">
     <style>
@@ -29,6 +29,9 @@
         .notification {
             transition: opacity 0.5s, transform 0.5s;
         }
+        .notification.buy { border-left: 4px solid #34d399; }
+        .notification.sell { border-left: 4px solid #f87171; }
+
         .glowing-text {
              text-shadow: 0 0 8px rgba(52, 211, 153, 0.8);
         }
@@ -59,17 +62,15 @@
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div class="card">
                 <h2 class="text-lg font-semibold text-gray-300">나스닥 시총 1위</h2>
-                <div id="nasdaq-loader" class="hidden"></div>
                 <div id="nasdaq-content" class="mt-4 text-center">
-                    <p id="nasdaq-ticker" class="text-4xl font-bold text-blue-400">-</p>
+                    <p id="nasdaq-ticker" class="text-4xl font-bold">-</p>
                     <p id="nasdaq-marketcap" class="text-xl text-gray-400 mt-2">-</p>
                 </div>
             </div>
             <div class="card">
                 <h2 class="text-lg font-semibold text-gray-300">테슬라 (TSLA)</h2>
-                <div id="tesla-loader" class="hidden"></div>
                 <div id="tesla-content" class="mt-4 text-center">
-                    <p class="text-4xl font-bold text-green-400">TSLA</p>
+                    <a id="tesla-ticker-link" href="https://kr.investing.com/equities/tesla-motors-chart" target="_blank" class="text-4xl font-bold hover:underline">TSLA</a>
                     <p id="tesla-marketcap" class="text-xl text-gray-400 mt-2">-</p>
                 </div>
             </div>
@@ -89,22 +90,18 @@
                     </div>
                     <div class="flex justify-between text-sm mt-2 text-gray-400">
                         <span>0%</span>
-                        <span id="target-25" class="font-bold">목표1: 25%</span>
-                        <span id="target-33" class="font-bold">목표2: 33%</span>
+                        <span id="target-25" class="font-bold">목표1: 25% (BUY)</span>
+                        <span id="target-33" class="font-bold">목표2: 33% (SELL)</span>
                         <span>50%</span>
                     </div>
                 </div>
             </div>
             <div id="last-updated" class="text-xs text-gray-500 text-center mt-4"></div>
         </div>
-        
-        <div class="text-center text-xs text-gray-500 p-4 bg-gray-800 rounded-lg">
-            <p><strong>안내:</strong> 이 애플리케이션은 Finnhub API를 통해 실제 시장 데이터를 가져옵니다. API 무료 플랜의 제한으로 인해 데이터는 1분마다 갱신됩니다.</p>
-        </div>
     </div>
 
     <!-- 알림창 -->
-    <div id="notification-area" class="fixed bottom-5 right-5 space-y-2"></div>
+    <div id="notification-area" class="fixed bottom-5 right-5 space-y-3"></div>
 
     <script>
         // --- 설정 ---
@@ -113,10 +110,22 @@
         const TARGET_RATIO_1 = 25;
         const TARGET_RATIO_2 = 33;
         const NASDAQ_CANDIDATES = ['AAPL', 'MSFT', 'NVDA']; // 나스닥 1위 후보
+        const INVESTING_SLUGS = {
+            AAPL: 'apple-inc',
+            MSFT: 'microsoft-corp',
+            NVDA: 'nvidia-corp'
+        };
+        const TICKER_COLORS = {
+            AAPL: 'text-gray-400',
+            MSFT: 'text-blue-500',
+            NVDA: 'text-green-500',
+            TSLA: 'text-red-500'
+        };
 
         // --- DOM 요소 ---
         const nasdaqTickerEl = document.getElementById('nasdaq-ticker');
         const nasdaqMarketCapEl = document.getElementById('nasdaq-marketcap');
+        const teslaTickerLinkEl = document.getElementById('tesla-ticker-link');
         const teslaMarketCapEl = document.getElementById('tesla-marketcap');
         const ratioTextEl = document.getElementById('ratio-text');
         const progressBarEl = document.getElementById('progress-bar');
@@ -133,111 +142,54 @@
 
         // --- 데이터 포맷 함수 ---
         function formatMarketCap(num) {
-            // Finnhub의 marketCapitalization은 백만 단위이므로 1,000,000을 곱해줍니다.
             const fullValue = num * 1000000;
-            if (fullValue >= 1e12) {
-                return `$${(fullValue / 1e12).toFixed(2)}T`; // 조 단위
-            }
-            return `$${(fullValue / 1e9).toFixed(2)}B`; // 억 단위
+            return fullValue >= 1e12 ? `$${(fullValue / 1e12).toFixed(2)}T` : `$${(fullValue / 1e9).toFixed(2)}B`;
         }
 
-        // --- Finnhub API 호출 함수 ---
+        // --- API 호출 함수 ---
         async function fetchCompanyProfile(symbol) {
             const url = `https://finnhub.io/api/v1/stock/profile2?symbol=${symbol}&token=${API_KEY}`;
             const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch data for ${symbol}. Status: ${response.status}`);
-            }
+            if (!response.ok) throw new Error(`Failed to fetch profile for ${symbol}.`);
             return response.json();
         }
 
         // --- 실제 주식 데이터 가져오기 ---
         async function fetchStockData() {
-            console.log("Fetching real stock data from Finnhub...");
             try {
-                const tickersToFetch = [...NASDAQ_CANDIDATES, 'TSLA'];
-                const promises = tickersToFetch.map(ticker => fetchCompanyProfile(ticker));
+                const promises = [...NASDAQ_CANDIDATES, 'TSLA'].map(ticker => fetchCompanyProfile(ticker));
                 const results = await Promise.all(promises);
-
                 const companyData = {};
-                results.forEach(data => {
-                    if (data && data.ticker) {
-                        companyData[data.ticker] = data;
-                    }
-                });
-                
-                if (!companyData.TSLA || !companyData.TSLA.marketCapitalization) {
-                     throw new Error('Tesla data is missing or invalid.');
-                }
-                
-                const teslaData = {
-                    ticker: 'TSLA',
-                    marketCap: companyData.TSLA.marketCapitalization
-                };
-                
-                const nasdaqCompetitors = NASDAQ_CANDIDATES
-                    .map(ticker => companyData[ticker])
-                    .filter(data => data && data.marketCapitalization);
-
-                if(nasdaqCompetitors.length === 0){
-                    throw new Error('Could not fetch any NASDAQ competitor data.');
-                }
-
-                // 나스닥 1위 기업 찾기
+                results.forEach(data => data && data.ticker && (companyData[data.ticker] = data));
+                if (!companyData.TSLA || !companyData.TSLA.marketCapitalization) throw new Error('Tesla data is missing.');
+                const nasdaqCompetitors = NASDAQ_CANDIDATES.map(t => companyData[t]).filter(d => d && d.marketCapitalization);
+                if (nasdaqCompetitors.length === 0) throw new Error('Could not fetch NASDAQ competitor data.');
                 const nasdaq1st = nasdaqCompetitors.sort((a, b) => b.marketCapitalization - a.marketCapitalization)[0];
-                
-                const nasdaq1stData = {
-                    ticker: nasdaq1st.ticker,
-                    marketCap: nasdaq1st.marketCapitalization
-                };
-
-                return { nasdaq1st: nasdaq1stData, tesla: teslaData };
-
+                return { nasdaq1st, tesla: companyData.TSLA };
             } catch (error) {
-                console.error("데이터를 가져오는 중 오류 발생:", error);
+                console.error("데이터 가져오는 중 오류:", error);
                 nasdaqTickerEl.textContent = "오류";
-                nasdaqMarketCapEl.textContent = "데이터 로드 실패";
                 lastUpdatedEl.textContent = `오류: ${error.message}`;
                 return null;
             }
         }
 
-        // --- 알림 함수 (이전과 동일) ---
-        function showNotification(threshold, ratio) {
+        // --- 알림 함수 ---
+        function showNotification(type, ratio) {
+            const isBuy = type === 'buy';
             const notificationId = `notif-${Date.now()}`;
             const notification = document.createElement('div');
             notification.id = notificationId;
-            notification.className = 'notification card w-80 transform translate-x-full opacity-0';
-            notification.innerHTML = `
-                <div class="flex items-start">
-                    <div class="text-2xl mr-3">${threshold === TARGET_RATIO_1 ? '🔔' : '🚀'}</div>
-                    <div>
-                        <p class="font-bold text-green-400">목표 비율 달성!</p>
-                        <p class="text-sm text-gray-300 mt-1">테슬라 시총 비율이 <strong class="text-white">${ratio.toFixed(2)}%</strong>로, 목표 <strong class="text-white">${threshold}%</strong>를 돌파했습니다.</p>
-                    </div>
-                </div>
-            `;
+            notification.className = `notification card w-80 transform translate-x-full opacity-0 ${isBuy ? 'buy' : 'sell'}`;
+            notification.innerHTML = `<div class="flex items-center"><div class="text-3xl mr-4">${isBuy ? '🟢' : '🔴'}</div><div><p class="font-bold text-lg ${isBuy ? 'text-green-400' : 'text-red-400'}">${isBuy ? '매수 (BUY) 신호' : '매도 (SELL) 신호'}</p><p class="text-sm text-gray-300 mt-1">현재 비율: ${ratio.toFixed(2)}%</p></div></div>`;
             notificationAreaEl.appendChild(notification);
-            setTimeout(() => {
-                notification.classList.remove('translate-x-full', 'opacity-0');
-            }, 100);
+            setTimeout(() => notification.classList.remove('translate-x-full', 'opacity-0'), 100);
             setTimeout(() => {
                 notification.classList.add('opacity-0');
                 notification.addEventListener('transitionend', () => notification.remove());
             }, 8000);
         }
         
-        // --- 로더 표시/숨김 함수 ---
-        function toggleLoading(isLoading) {
-             if(isLoading) {
-                 ratioLoaderEl.style.display = 'block';
-                 ratioContentEl.style.display = 'none';
-             } else {
-                 ratioLoaderEl.style.display = 'none';
-                 ratioContentEl.style.display = 'block';
-             }
-        }
-
         // --- UI 업데이트 함수 ---
         async function updateUI() {
             toggleLoading(true);
@@ -247,51 +199,59 @@
             if (!data) return;
 
             const { nasdaq1st, tesla } = data;
-            // 시총이 0인 경우 방지
-            if (!nasdaq1st.marketCap || !tesla.marketCap) {
-                console.error("Market cap data is invalid.");
-                return;
+            const ratio = (tesla.marketCapitalization / nasdaq1st.marketCapitalization) * 100;
+            
+            // 나스닥 1위 티커를 링크와 색상으로 만들기
+            const nasdaqTicker = nasdaq1st.ticker;
+            const slug = INVESTING_SLUGS[nasdaqTicker];
+            const nasdaqColor = TICKER_COLORS[nasdaqTicker] || 'text-blue-400';
+            
+            if(slug) {
+                const url = `https://kr.investing.com/equities/${slug}-chart`;
+                nasdaqTickerEl.innerHTML = `<a href="${url}" target="_blank" class="hover:underline">${nasdaqTicker}</a>`;
+            } else {
+                nasdaqTickerEl.textContent = nasdaqTicker;
             }
-            const ratio = (tesla.marketCap / nasdaq1st.marketCap) * 100;
+            nasdaqTickerEl.className = `text-4xl font-bold ${nasdaqColor}`;
+            
+            // 테슬라 티커 색상 적용
+            teslaTickerLinkEl.className = `text-4xl font-bold ${TICKER_COLORS.TSLA} hover:underline`;
 
-            // 데이터 표시 업데이트
-            nasdaqTickerEl.textContent = nasdaq1st.ticker;
-            nasdaqMarketCapEl.textContent = formatMarketCap(nasdaq1st.marketCap);
-            teslaMarketCapEl.textContent = formatMarketCap(tesla.marketCap);
 
-            // 비율 및 프로그레스 바 업데이트
+            nasdaqMarketCapEl.textContent = formatMarketCap(nasdaq1st.marketCapitalization);
+            teslaMarketCapEl.textContent = formatMarketCap(tesla.marketCapitalization);
             ratioTextEl.textContent = `${ratio.toFixed(2)}%`;
-            progressBarEl.style.width = `${Math.min(ratio * 2, 100)}%`; // 50%를 100%로 표시
-
-            // 마지막 업데이트 시간
+            progressBarEl.style.width = `${Math.min(ratio * 2, 100)}%`;
             lastUpdatedEl.textContent = `마지막 업데이트: ${new Date().toLocaleTimeString('ko-KR')}`;
             
             checkAndNotify(ratio);
         }
 
-        // --- 알림 조건 확인 함수 (이전과 동일) ---
+        function toggleLoading(isLoading) {
+            ratioLoaderEl.style.display = isLoading ? 'block' : 'none';
+            ratioContentEl.classList.toggle('hidden', isLoading);
+        }
+        
+        // --- 알림 조건 확인 함수 ---
         function checkAndNotify(ratio) {
             if (ratio >= TARGET_RATIO_2 && !notifiedFor33) {
-                showNotification(TARGET_RATIO_2, ratio);
-                notifiedFor33 = true;
-                target33El.classList.add('text-green-400', 'glowing-text');
+                showNotification('sell', ratio); notifiedFor33 = true;
+                target33El.classList.add('text-red-400', 'glowing-text');
             } else if (ratio < TARGET_RATIO_2) {
-                 if (notifiedFor33) notifiedFor33 = false;
-                 target33El.classList.remove('text-green-400', 'glowing-text');
+                if (notifiedFor33) notifiedFor33 = false;
+                target33El.classList.remove('text-red-400', 'glowing-text');
             }
-
-            if (ratio >= TARGET_RATIO_1 && !notifiedFor25) {
-                showNotification(TARGET_RATIO_1, ratio);
-                notifiedFor25 = true;
-                 target25El.classList.add('text-green-400', 'glowing-text');
-            } else if (ratio < TARGET_RATIO_1) {
+            if (ratio < TARGET_RATIO_1 && !notifiedFor25) {
+                showNotification('buy', ratio); notifiedFor25 = true;
+                target25El.classList.add('text-green-400', 'glowing-text');
+            } else if (ratio > TARGET_RATIO_1) {
                 if (notifiedFor25) notifiedFor25 = false;
                 target25El.classList.remove('text-green-400', 'glowing-text');
             }
         }
         
         // --- 애플리케이션 시작 ---
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', async () => {
             updateUI();
             setInterval(updateUI, UPDATE_INTERVAL);
         });
